@@ -1,0 +1,12 @@
+{
+  "name": "sitewatch-server",
+  "version": "1.0.0",
+  "private": true,
+  "description": "SiteWatch team server: shared monitors, incidents and live status",
+  "main": "index.js",
+  "scripts": {
+    "start": "node --env-file=.env index.js",
+    "test": "node test.js"
+  },
+  "engines": { "node": ">=22.13" }
+}
