@@ -96,8 +96,11 @@ async function listen(token, bag) {
   await sleep(300);
   assert.ok(ginEvents.some((e) => e.ev === 'alert' && e.data.type === 'up'));
   await assert.rejects(api('POST', `/incidents/${inc.id}/ack`, { status: 'investigating' }, tom.token), /already back online/);
+  await api('POST', `/incidents/${inc.id}/note`, { note: 'Host restarted PHP' }, gin.token);
   const events = await api('GET', `/incidents/${inc.id}/events`, null, gin.token);
-  assert.deepEqual(events.map((e) => e.type), ['down', 'status', 'recovered']);
+  assert.deepEqual(events.map((e) => e.type), ['down', 'status', 'recovered', 'note']);
+  const [closed] = await api('GET', '/incidents?status=resolved', null, tom.token);
+  assert.equal(closed.note, 'Host restarted PHP');
   console.log('ok - recovery closes the incident with a timeline');
 
   // Rejoining from the same PC replaces the old token

@@ -128,6 +128,18 @@ route('POST', '/api/incidents/:id/ack', ({ params, body, member }) => {
   return db.incidents.get(id);
 });
 
+// Notes can be added any time, including after the site recovered (e.g. what fixed it)
+route('POST', '/api/incidents/:id/note', ({ params, body, member }) => {
+  const id = num(params.id);
+  if (!db.incidents.get(id)) throw new HttpError(404, 'Incident not found');
+  const note = String(body.note || '').trim();
+  if (!note || note.length > 300) throw new HttpError(400, 'Enter a note (up to 300 characters)');
+  db.incidents.setNote(id, note);
+  db.incidents.event(id, 'note', member.name, `Added a note: ${note}`);
+  changed();
+  return db.incidents.get(id);
+});
+
 route('GET', '/api/settings', () => db.settings.get());
 route('PUT', '/api/settings', ({ body }) => {
   const clean = v.cleanSettings(body);

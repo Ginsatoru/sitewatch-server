@@ -110,6 +110,7 @@ const incidents = {
   allOpen: () => q('SELECT i.*, m.name, m.url FROM incidents i JOIN monitors m ON m.id = i.monitor_id WHERE i.resolved_at IS NULL ORDER BY i.started_at DESC').all(),
   start: (id, ts, reason) => Number(q('INSERT INTO incidents (monitor_id, started_at, reason) VALUES (?, ?, ?)').run(id, ts, n(reason)).lastInsertRowid),
   setAck: (id, status, by, note) => q('UPDATE incidents SET ack_status = ?, ack_by = ?, ack_at = ?, note = ? WHERE id = ?').run(status, n(by), Date.now(), n(note), id),
+  setNote: (id, note) => q('UPDATE incidents SET note = ? WHERE id = ?').run(n(note), id),
   setReminded: (id) => q('UPDATE incidents SET reminded = 1 WHERE id = ?').run(id),
   event: (id, type, member, text) => q('INSERT INTO incident_events (incident_id, ts, type, member, text) VALUES (?, ?, ?, ?, ?)').run(id, Date.now(), type, n(member), n(text)),
   events: (id) => q('SELECT ts, type, member, text FROM incident_events WHERE incident_id = ? ORDER BY ts, id').all(id),
