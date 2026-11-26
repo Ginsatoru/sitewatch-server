@@ -4,10 +4,15 @@ const http = require('node:http');
 const os = require('node:os');
 const fs = require('node:fs');
 const path = require('node:path');
-process.env.TEAM_CODE = 'test-team-code';
+process.env.SECRET = 'test-secret-1234567890';
 process.env.PORT = '4199';
 process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'swsrv-'));
 require('./engine').isOnline = async () => true; // the sandbox has no general internet
+// first admin is created from the command line on the VPS; do the same here
+const db0 = require('./db');
+db0.init(path.join(process.env.DATA_DIR, 'sitewatch.db'));
+db0.users.add({ name: 'Gin', email: 'gin@aaapos.com', pass_hash: require('./auth').hashPassword('admin-pass-1'), role: 'admin' });
+db0.close();
 require('./index');
 
 const BASE = 'http://127.0.0.1:4199/api';
@@ -47,11 +52,16 @@ async function listen(token, bag) {
 
 (async () => {
   await sleep(300);
-  await assert.rejects(api('POST', '/join', { name: 'X', code: 'nope', device: 'device-0001' }), /Wrong team code/);
-  await assert.rejects(api('GET', '/state'), /Not signed in/);
-  const gin = await api('POST', '/join', { name: 'Gin', code: 'test-team-code', device: 'device-gin-1' });
-  const tom = await api('POST', '/join', { name: 'Tom', code: 'test-team-code', device: 'device-tom-1' });
-  console.log('ok - join with team code');
+  await assert.rejects(api('POST', '/login', { email: 'gin@aaapos.com', password: 'nope', device: 'device-0001' }), /Wrong email or password/);
+  await assert.rejects(api('GET', '/state'), /sign in/);
+  const gin = await api('POST', '/login', { email: 'GIN@aaapos.com', password: 'admin-pass-1', device: 'device-gin-1' });
+  assert.equal(gin.user.role, 'admin');
+  await api('POST', '/users', { name: 'Tom', email: 'tom@aaapos.com', password: 'member-pass', role: 'member' }, gin.token);
+  const tom = await api('POST', '/login', { email: 'tom@aaapos.com', password: 'member-pass', device: 'device-tom-1' });
+  await assert.rejects(api('POST', '/monitors', { name: 'X', url: 'x.com', interval: 60, timeout: 5 }, tom.token), /Only admins/);
+  await assert.rejects(api('PUT', '/settings', { threshold: 2 }, tom.token), /Only admins/);
+  await assert.rejects(api('POST', '/users', { name: 'Y', email: 'y@a.com', password: 'xxxxxxxx' }, tom.token), /Only admins/);
+  console.log('ok - email login, admin creates accounts, members limited');
 
   const ginEvents = [];
   const tomEvents = [];
@@ -65,7 +75,7 @@ async function listen(token, bag) {
   await api('PUT', '/settings', { threshold: 2, remindAfter: 1 }, gin.token);
   const url = `http://127.0.0.1:${site.address().port}/`;
   const m = await api('POST', '/monitors', { name: 'Shop', url, interval: 60, timeout: 5 }, gin.token);
-  const imp = await api('POST', '/monitors/import', { monitors: [{ name: 'Dup', url, interval: 60, timeout: 5 }, { name: 'Bad', url: 'not a url' }] }, tom.token);
+  const imp = await api('POST', '/monitors/import', { monitors: [{ name: 'Dup', url, interval: 60, timeout: 5 }, { name: 'Bad', url: 'not a url' }] }, gin.token);
   assert.deepEqual(imp, { added: 0, skipped: 2 });
   await sleep(800);
   st = await api('GET', '/state', null, tom.token);
@@ -73,7 +83,7 @@ async function listen(token, bag) {
   console.log('ok - monitor added by one member, seen by another');
 
   mode = 503;
-  await api('POST', `/monitors/${m.id}/check`, null, gin.token);
+  await api('POST', `/monitors/${m.id}/check`, null, tom.token); // check now is allowed for members
   await api('POST', `/monitors/${m.id}/check`, null, gin.token);
   await sleep(300);
   assert.ok(tomEvents.some((e) => e.ev === 'alert' && e.data.type === 'down'), 'down alert reached Tom');
@@ -103,15 +113,28 @@ async function listen(token, bag) {
   assert.equal(closed.note, 'Host restarted PHP');
   console.log('ok - recovery closes the incident with a timeline');
 
-  // Rejoining from the same PC replaces the old token
-  const gin2 = await api('POST', '/join', { name: 'Gin B', code: 'test-team-code', device: 'device-gin-1' });
-  await assert.rejects(api('GET', '/state', null, gin.token), /Not signed in/);
-  assert.equal((await api('GET', '/state', null, gin2.token)).me.name, 'Gin B');
-  console.log('ok - one membership per device');
+  // Removing a user signs them out everywhere and ends their live stream
+  const tomId = (await api('GET', '/users', null, gin.token)).find((u) => u.email === 'tom@aaapos.com').id;
+  await assert.rejects(api('DELETE', `/users/${(await api('GET', '/state', null, gin.token)).me.id}`, null, gin.token), /own account/);
+  await api('DELETE', `/users/${tomId}`, null, gin.token);
+  await assert.rejects(api('GET', '/state', null, tom.token), /sign in/);
+  console.log('ok - removed user signed out');
 
-  for (let i = 0; i < 5; i++) await api('POST', '/join', { name: 'X', code: 'bad', device: 'device-x-0001' }).catch(() => {});
-  await assert.rejects(api('POST', '/join', { name: 'X', code: 'test-team-code', device: 'device-x-0001' }), /Too many attempts/);
-  console.log('ok - join rate limited');
+  // WordPress sites live on the server, keys never returned
+  const wpSite = await api('POST', '/wp/sites', { name: 'Shop WP', url: 'http://127.0.0.1:9', key: 'a'.repeat(64) }, gin.token);
+  const sites = await api('GET', '/wp/sites', null, gin.token);
+  assert.equal(sites[0].name, 'Shop WP');
+  assert.equal(sites[0].key_enc, undefined);
+  const imported = await api('POST', '/wp/import', { sites: [{ name: 'Dup', url: 'http://127.0.0.1:9', key: 'b'.repeat(64) }, { name: 'Two', url: 'http://127.0.0.1:8', key: 'c'.repeat(64) }] }, gin.token);
+  assert.equal(imported.added, 1);
+  const sched = await api('PUT', '/wp/schedule', { wpAuto: true, wpTime: '04:30' }, gin.token);
+  assert.ok(sched.next > Date.now());
+  console.log('ok - shared WordPress sites and schedule');
+
+  await assert.rejects(api('POST', '/login', { email: 'x@x.com', password: 'bad-pass-1', device: 'device-x-0001' }).then(() => api('POST', '/login', { email: 'x@x.com', password: 'bad', device: 'device-x-0001' })), /.+/);
+  for (let i = 0; i < 5; i++) await api('POST', '/login', { email: 'x@x.com', password: 'bad', device: 'device-x-0001' }).catch(() => {});
+  await assert.rejects(api('POST', '/login', { email: 'gin@aaapos.com', password: 'admin-pass-1', device: 'device-x-0001' }), /Too many attempts/);
+  console.log('ok - login rate limited');
 
   stopGin(); stopTom(); site.close();
   console.log('all passed');

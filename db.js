@@ -2,7 +2,12 @@
 const { DatabaseSync } = require('node:sqlite');
 
 // Team settings shared by everyone (personal settings stay in each desktop app)
-const DEFAULTS = { interval: 60, timeout: 10, threshold: 3, retention: 30, remindAfter: 10, pausedAll: false };
+const DEFAULTS = {
+  interval: 60, timeout: 10, threshold: 3, retention: 30, remindAfter: 10, pausedAll: false,
+  // WordPress manager (runs on the server)
+  wpAuto: false, wpAutoPlugins: true, wpAutoThemes: false, wpFrequency: 'daily', wpDay: 1, wpTime: '03:00',
+  wpCheckEvery: 30, wpMaintTimeout: 10, wpAutoMaint: true, wpLastRun: 0,
+};
 const MONITOR_STATE = ['status', 'fails', 'fail_since', 'last_code', 'last_ms', 'last_error', 'last_checked', 'active', 'status_since'];
 
 let db;
@@ -42,10 +47,15 @@ function init(file) {
       ts INTEGER NOT NULL, type TEXT NOT NULL, member TEXT, text TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_events_incident ON incident_events(incident_id, ts);
-    CREATE TABLE IF NOT EXISTS members (
-      id INTEGER PRIMARY KEY, name TEXT NOT NULL, device TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE,
-      created_at INTEGER NOT NULL, last_seen INTEGER
+    CREATE TABLE IF NOT EXISTS users (
+      id INTEGER PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL UNIQUE COLLATE NOCASE,
+      pass_hash TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'member', created_at INTEGER NOT NULL, last_seen INTEGER
     );
+    CREATE TABLE IF NOT EXISTS sessions (
+      id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      token_hash TEXT NOT NULL UNIQUE, device TEXT NOT NULL, created_at INTEGER NOT NULL, last_seen INTEGER
+    );
+    DROP TABLE IF EXISTS members;
     CREATE INDEX IF NOT EXISTS idx_incidents_monitor ON incidents(monitor_id, resolved_at);
     CREATE INDEX IF NOT EXISTS idx_incidents_started ON incidents(started_at);
     CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -133,14 +143,30 @@ function prune(days) {
   q('DELETE FROM incidents WHERE resolved_at IS NOT NULL AND resolved_at < ?').run(cutoff);
 }
 
-const members = {
-  add: (name, device, hash) => q('INSERT INTO members (name, device, token_hash, created_at, last_seen) VALUES (?, ?, ?, ?, ?)').run(name, device, hash, Date.now(), Date.now()),
-  byToken: (hash) => q('SELECT * FROM members WHERE token_hash = ?').get(hash),
-  rename: (id, name) => q('UPDATE members SET name = ? WHERE id = ?').run(name, id),
-  seen: (id) => q('UPDATE members SET last_seen = ? WHERE id = ?').run(Date.now(), id),
-  list: () => q('SELECT id, name, device, created_at, last_seen FROM members ORDER BY name COLLATE NOCASE').all(),
-  // One record per PC: joining again from the same device replaces its token
-  removeDevice: (device) => q('DELETE FROM members WHERE device = ?').run(device),
+const users = {
+  get: (id) => q('SELECT id, name, email, role, created_at, last_seen FROM users WHERE id = ?').get(id),
+  byEmail: (email) => q('SELECT * FROM users WHERE email = ?').get(email),
+  list: () => q('SELECT id, name, email, role, created_at, last_seen FROM users ORDER BY name COLLATE NOCASE').all(),
+  count: () => q('SELECT COUNT(*) AS c FROM users').get().c,
+  admins: () => q("SELECT COUNT(*) AS c FROM users WHERE role = 'admin'").get().c,
+  add: (u) => Number(q('INSERT INTO users (name, email, pass_hash, role, created_at) VALUES (?, ?, ?, ?, ?)').run(u.name, u.email, u.pass_hash, u.role, Date.now()).lastInsertRowid),
+  update(id, fields) {
+    const keys = Object.keys(fields).filter((k) => ['name', 'email', 'pass_hash', 'role'].includes(k));
+    if (keys.length) q(`UPDATE users SET ${keys.map((k) => `${k} = ?`).join(', ')} WHERE id = ?`).run(...keys.map((k) => fields[k]), id);
+  },
+  remove: (id) => q('DELETE FROM users WHERE id = ?').run(id),
+  seen: (id) => q('UPDATE users SET last_seen = ? WHERE id = ?').run(Date.now(), id),
 };
 
-module.exports = { init, close, settings, monitors, checks, incidents, members, prune, DEFAULTS };
+// One session per signed-in PC
+const sessions = {
+  add: (userId, hash, device) => {
+    q('DELETE FROM sessions WHERE user_id = ? AND device = ?').run(userId, device);
+    q('INSERT INTO sessions (user_id, token_hash, device, created_at, last_seen) VALUES (?, ?, ?, ?, ?)').run(userId, hash, device, Date.now(), Date.now());
+  },
+  user: (hash) => q('SELECT u.id, u.name, u.email, u.role, s.id AS session_id FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ?').get(hash),
+  remove: (hash) => q('DELETE FROM sessions WHERE token_hash = ?').run(hash),
+  removeUser: (userId) => q('DELETE FROM sessions WHERE user_id = ?').run(userId),
+};
+
+module.exports = { raw: () => db, init, close, settings, monitors, checks, incidents, users, sessions, prune, DEFAULTS };
