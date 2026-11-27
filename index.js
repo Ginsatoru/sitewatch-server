@@ -10,6 +10,7 @@ const auth = require('./auth');
 const wpStore = require('./wp/store');
 const wpClient = require('./wp/client');
 const WpManager = require('./wp/manager');
+const logo = require('./logo');
 
 const PORT = Number(process.env.PORT || 4100);
 const SECRET = process.env.SECRET || '';
@@ -21,6 +22,7 @@ if (SECRET.length < 16) {
 fs.mkdirSync(DATA_DIR, { recursive: true });
 db.init(path.join(DATA_DIR, 'sitewatch.db'));
 wpStore.init(db.raw(), auth.cipher(SECRET));
+logo.init();
 const wp = new WpManager({ store: wpStore, client: wpClient, settings: db.settings });
 
 const sha = (s) => crypto.createHash('sha256').update(String(s)).digest('hex');
@@ -206,6 +208,14 @@ route('POST', '/api/incidents/:id/note', ({ params, body, member }) => {
   db.incidents.event(id, 'note', member.name, `Added a note: ${note}`);
   changed();
   return db.incidents.get(id);
+});
+
+// Site logo for the cards (data URI or null), cached on the server
+route('GET', '/api/logo', async ({ query }) => {
+  let url;
+  try { url = new URL(String(query.get('url') || '')); } catch { throw new HttpError(400, 'Invalid url'); }
+  if (!['http:', 'https:'].includes(url.protocol)) throw new HttpError(400, 'Invalid url');
+  return logo.get(url.origin + '/');
 });
 
 route('GET', '/api/settings', () => db.settings.get());
